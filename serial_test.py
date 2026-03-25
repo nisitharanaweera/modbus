@@ -119,51 +119,14 @@ def receiver_thread(ser_rx, expected_bytes, fmt, results, stop_event):
             break
 
 
-def main():
-    ports = list_com_ports()
-    if not ports:
-        sys.exit(1)
+def run_test(tx_port, rx_port, tx_bytes, msg_bytes, expected_bytes_for_rx,
+             fmt, num_messages, baudrate, interval, direction_label=""):
+    """Run a single-direction send/receive test. Returns results dict."""
+    if direction_label:
+        print(f"\n{'#' * 50}")
+        print(f"  {direction_label}")
+        print(f"{'#' * 50}")
 
-    tx_port = select_com_port(ports, "TX (send)")
-    rx_port = select_com_port(ports, "RX (receive)")
-
-    if tx_port == rx_port:
-        print("Error: TX and RX ports must be different.")
-        sys.exit(1)
-
-    # --- Data format ---
-    fmt = select_data_format()
-
-    # --- Message ---
-    if fmt == "text":
-        message = input("\nEnter text message [Hello there!]: ").strip() or "Hello there!"
-    elif fmt == "hex":
-        message = input("\nEnter hex string [ABABABABABAB]: ").strip() or "ABABABABABAB"
-    elif fmt == "binary":
-        message = input("\nEnter binary string [10110100]: ").strip() or "10110100"
-
-    try:
-        msg_bytes = encode_message(message, fmt)
-    except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
-
-    # For text mode, append newline as delimiter
-    if fmt == "text":
-        tx_bytes = msg_bytes + b"\n"
-    else:
-        tx_bytes = msg_bytes
-
-    print(f"  Encoded ({len(msg_bytes)} bytes): {format_received(msg_bytes, 'hex')}")
-
-    num_input = input("\nEnter number of messages to send [100]: ").strip()
-    num_messages = int(num_input) if num_input else 100
-    baudrate = input("Enter baud rate [9600]: ").strip()
-    baudrate = int(baudrate) if baudrate else 9600
-    interval = input("Enter interval between messages in seconds [0.2]: ").strip()
-    interval = float(interval) if interval else 0.2
-
-    # --- Open ports ---
     print(f"\nOpening TX: {tx_port}, RX: {rx_port} at {baudrate} baud...")
     ser_tx = None
     ser_rx = None
@@ -174,13 +137,7 @@ def main():
         print(f"Serial error: {e}")
         if ser_tx and ser_tx.is_open:
             ser_tx.close()
-        sys.exit(1)
-
-    # --- Start receiver ---
-    if fmt == "text":
-        expected_bytes_for_rx = msg_bytes + b"\n"
-    else:
-        expected_bytes_for_rx = msg_bytes
+        return None
 
     results = {
         "received": 0,
@@ -196,7 +153,6 @@ def main():
     )
     rx.start()
 
-    # --- Send messages ---
     print(f"\nSending {num_messages} messages ({fmt} format)...\n")
     for i in range(num_messages):
         ser_tx.write(tx_bytes)
@@ -204,17 +160,19 @@ def main():
         if i < num_messages - 1:
             time.sleep(interval)
 
-    # --- Wait for remaining RX data ---
     print("\nWaiting for remaining responses...")
     time.sleep(max(2.0, interval * 3))
     stop_event.set()
     rx.join(timeout=3)
 
-    # --- Close ports ---
     ser_tx.close()
     ser_rx.close()
 
-    # --- Summary ---
+    return results
+
+
+def print_results(tx_port, rx_port, baudrate, fmt, msg_bytes, num_messages, results, label=""):
+    """Print test summary for one direction."""
     sent = num_messages
     received = results["received"]
     matched = results["matched"]
@@ -222,6 +180,8 @@ def main():
     lost = sent - received
 
     print("\n" + "=" * 50)
+    if label:
+        print(f"  {label}")
     print("  RS-485 COMMUNICATION TEST RESULTS")
     print("=" * 50)
     print(f"  TX port:        {tx_port}")
@@ -243,6 +203,113 @@ def main():
         print(f"\nCorruption details (first {min(50, len(results['errors']))}):")
         for err in results["errors"][:50]:
             print(err)
+
+    return matched, sent
+
+
+def main():
+    ports = list_com_ports()
+    if not ports:
+        sys.exit(1)
+
+    # --- Test direction ---
+    print("\nTest direction:")
+    print("  1. Single direction (Port A -> Port B)")
+    print("  2. Bidirectional   (Port A -> Port B, then Port B -> Port A)")
+    dir_choice = input("Select direction [1]: ").strip() or "1"
+    bidirectional = dir_choice == "2"
+
+    port_a = select_com_port(ports, "Port A")
+    port_b = select_com_port(ports, "Port B")
+
+    if port_a == port_b:
+        print("Error: Port A and Port B must be different.")
+        sys.exit(1)
+
+    # --- Data format ---
+    fmt = select_data_format()
+
+    # --- Message ---
+    if fmt == "text":
+        message = input("\nEnter text message [Hello there!]: ").strip() or "Hello there!"
+    elif fmt == "hex":
+        message = input("\nEnter hex string [ABABABABABAB]: ").strip() or "ABABABABABAB"
+    elif fmt == "binary":
+        message = input("\nEnter binary string [10110100]: ").strip() or "10110100"
+
+    try:
+        msg_bytes = encode_message(message, fmt)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if fmt == "text":
+        tx_bytes = msg_bytes + b"\n"
+        expected_bytes_for_rx = msg_bytes + b"\n"
+    else:
+        tx_bytes = msg_bytes
+        expected_bytes_for_rx = msg_bytes
+
+    print(f"  Encoded ({len(msg_bytes)} bytes): {format_received(msg_bytes, 'hex')}")
+
+    num_input = input("\nEnter number of messages to send [100]: ").strip()
+    num_messages = int(num_input) if num_input else 100
+
+    baud_options = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200]
+    print("\nBaud rate options:")
+    for i, b in enumerate(baud_options, 1):
+        default_mark = " (default)" if b == 9600 else ""
+        print(f"  {i}. {b}{default_mark}")
+    baud_choice = input("Select baud rate [4]: ").strip()
+    baud_idx = int(baud_choice) - 1 if baud_choice else 3
+    if 0 <= baud_idx < len(baud_options):
+        baudrate = baud_options[baud_idx]
+    else:
+        print("Invalid choice, using 9600.")
+        baudrate = 9600
+
+    interval = input("Enter interval between messages in seconds [0.02]: ").strip()
+    interval = float(interval) if interval else 0.02
+
+    # --- Direction 1: Port A -> Port B ---
+    label1 = f"Direction 1: {port_a} -> {port_b}" if bidirectional else ""
+    results1 = run_test(port_a, port_b, tx_bytes, msg_bytes, expected_bytes_for_rx,
+                        fmt, num_messages, baudrate, interval, label1)
+    if results1 is None:
+        sys.exit(1)
+
+    print_results(port_a, port_b, baudrate, fmt, msg_bytes, num_messages, results1,
+                  label1)
+
+    # --- Direction 2: Port B -> Port A (if bidirectional) ---
+    if bidirectional:
+        label2 = f"Direction 2: {port_b} -> {port_a}"
+        results2 = run_test(port_b, port_a, tx_bytes, msg_bytes, expected_bytes_for_rx,
+                            fmt, num_messages, baudrate, interval, label2)
+        if results2 is None:
+            sys.exit(1)
+
+        print_results(port_b, port_a, baudrate, fmt, msg_bytes, num_messages, results2,
+                      label2)
+
+        # --- Combined summary ---
+        total_sent = num_messages * 2
+        total_matched = results1["matched"] + results2["matched"]
+        total_corrupted = results1["corrupted"] + results2["corrupted"]
+        total_received = results1["received"] + results2["received"]
+        total_lost = total_sent - total_received
+
+        print("\n" + "=" * 50)
+        print("  BIDIRECTIONAL COMBINED SUMMARY")
+        print("=" * 50)
+        print(f"  Total sent:     {total_sent}")
+        print(f"  Total received: {total_received}")
+        print(f"  Total matched:  {total_matched}")
+        print(f"  Total corrupted:{total_corrupted}")
+        print(f"  Total lost:     {total_lost}")
+        if total_sent > 0:
+            print(f"  Overall rate:   {(total_matched / total_sent) * 100:.1f}%")
+        print("=" * 50)
 
     print("\nDone.")
 
