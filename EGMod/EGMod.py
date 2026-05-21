@@ -26,11 +26,34 @@ def _detect_slave_kwarg():
 
 _SLAVE_KW = _detect_slave_kwarg() if PYMODBUS_OK else "unit"
 
+# ── VS Code Dark+ palette ───────────────────────────────────────────
+_BG    = "#1E1E1E"   # editor / main window
+_BG2   = "#252526"   # sidebar / panels
+_BG3   = "#3C3C3C"   # input fields
+_FG    = "#D4D4D4"   # default text
+_FG2   = "#858585"   # dimmed / hint text
+_ACC   = "#007ACC"   # accent blue
+_SEL   = "#264F78"   # selection background
+_BORD  = "#474747"   # borders
+# cell colours
+_CELL_HDR_BG  = "#2D2D2D"
+_CELL_HDR_FG  = "#9CDCFE"   # VS Code variable blue
+_CELL_VAL_BG  = "#252526"
+_CELL_VAL_FG  = "#D4D4D4"
+_CELL_WR_BG   = "#3C3C3C"
+_CELL_WR_FG   = "#CE9178"   # VS Code string orange
+
 def get_lowest_com(ports):
     def key(p):
         u = p.upper()
         return int(u[3:]) if u.startswith("COM") and u[3:].isdigit() else 99999
     return min(ports, key=key) if ports else ""
+
+def _port_label(p):
+    desc = (p.description or "").strip()
+    if desc and desc != p.device:
+        return f"{p.device}  —  {desc}"
+    return p.device
 
 def to_display(value, fmt):
     if fmt == "Hex":    return f"0x{value:04X}"
@@ -56,6 +79,7 @@ class SerialMonitor(tk.Toplevel):
         self._poll()
 
     def _build_ui(self):
+        self.configure(bg=_BG)
         bar = ttk.Frame(self, padding=(6, 4, 6, 0))
         bar.pack(fill="x")
         ttk.Checkbutton(bar, text="Timestamp", variable=self._ts_var,
@@ -64,18 +88,21 @@ class SerialMonitor(tk.Toplevel):
         for fmt in ("Text", "Hex", "Binary"):
             ttk.Radiobutton(bar, text=fmt, variable=self._fmt_var,
                             value=fmt, command=self._rerender).pack(side="left", padx=(0, 4))
-        ttk.Button(bar, text="Clear", command=self._clear).pack(side="right")
+        ttk.Button(bar, text="Clear", command=self._clear, style="Teal.TButton").pack(side="right")
         ttk.Separator(self, orient="horizontal").pack(fill="x", padx=4, pady=(4, 0))
         self._txt = scrolledtext.ScrolledText(
             self, font=("Consolas", 9), state="disabled", wrap="none",
-            bg="#1A202C", fg="#E2E8F0", insertbackground="white")
+            bg=_BG, fg=_FG, insertbackground=_FG,
+            selectbackground=_SEL, selectforeground=_FG)
         self._txt.pack(fill="both", expand=True, padx=4, pady=4)
-        self._txt.tag_configure("ts",     foreground="#4A5568")
-        self._txt.tag_configure("tx_dir", foreground="#63B3ED", font=("Consolas", 9, "bold"))
-        self._txt.tag_configure("tx",     foreground="#90CDF4")
-        self._txt.tag_configure("rx_dir", foreground="#68D391", font=("Consolas", 9, "bold"))
-        self._txt.tag_configure("rx",     foreground="#9AE6B4")
-        self._txt.tag_configure("info",   foreground="#F6AD55")
+        self._txt.vbar.configure(bg=_BG2, troughcolor=_BG, activebackground="#5A5A5A",
+                                 relief="flat", borderwidth=0, highlightthickness=0)
+        self._txt.tag_configure("ts",     foreground=_FG2)
+        self._txt.tag_configure("tx_dir", foreground="#569CD6", font=("Consolas", 9, "bold"))
+        self._txt.tag_configure("tx",     foreground="#9CDCFE")
+        self._txt.tag_configure("rx_dir", foreground="#4EC9B0", font=("Consolas", 9, "bold"))
+        self._txt.tag_configure("rx",     foreground="#B5CEA8")
+        self._txt.tag_configure("info",   foreground="#CE9178")
 
     def log_tx(self, data):
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -162,11 +189,16 @@ class EGMod:
     def __init__(self, root):
         self.root = root
         self.root.title("EGMod — Modbus RTU Tool")
+        try:
+            self.root.iconbitmap("icon.ico")
+        except Exception:
+            pass
         self.root.minsize(820, 560)
         self.client = None
         self.connected = False
         self.connected_port = None
         self._serial_monitor = None
+        self._port_map = {}  # label -> device
         self._orig_serial_read = None
         self._orig_serial_write = None
         self._apply_style()
@@ -174,19 +206,107 @@ class EGMod:
         self._build_tabs()
         self._start_monitor()
 
+    def _bind_fmt_scroll(self, spin, fmt_cb, lo, hi):
+        """Bind mouse-wheel to spin in a format-aware way (Decimal/Hex/Binary)."""
+        def _wheel(event):
+            step = 1 if event.delta > 0 else -1
+            raw = spin.get().strip()
+            fmt = fmt_cb.get()
+            try:
+                if fmt == "Hex":    val = int(raw, 16)
+                elif fmt == "Binary": val = int(raw, 2)
+                else:               val = int(raw)
+            except ValueError:
+                val = lo
+            val = max(lo, min(hi, val + step))
+            if fmt == "Hex":    spin.set(f"{val:X}")
+            elif fmt == "Binary": spin.set(f"{val:b}")
+            else:               spin.set(str(val))
+            return "break"
+        spin.bind("<MouseWheel>", _wheel)
+
     def _apply_style(self):
+        self.root.configure(bg=_BG)
         s = ttk.Style()
         s.theme_use("clam")
-        s.configure("TLabel", font=("Segoe UI", 10))
-        s.configure("TEntry", font=("Segoe UI", 10))
-        s.configure("TCombobox", font=("Segoe UI", 10))
-        s.configure("TSpinbox", font=("Segoe UI", 10))
-        s.configure("Teal.TButton", font=("Segoe UI", 10, "bold"),
-                    foreground="white", background="#2C7A7B", padding=6, relief="flat")
-        s.map("Teal.TButton", background=[("active","#319795"),("disabled","#718096")])
-        s.configure("Red.TButton", font=("Segoe UI", 10, "bold"),
-                    foreground="white", background="#C53030", padding=6, relief="flat")
-        s.map("Red.TButton", background=[("active","#9B2C2C")])
+        # root defaults — cascade to all unstyled widgets
+        s.configure(".",
+            background=_BG2, foreground=_FG,
+            fieldbackground=_BG3, selectbackground=_SEL, selectforeground=_FG,
+            bordercolor=_BORD, lightcolor=_BG2, darkcolor=_BG2,
+            troughcolor=_BG2, insertcolor=_FG,
+            font=("Segoe UI", 10))
+        s.configure("TFrame",      background=_BG2)
+        s.configure("TLabel",      background=_BG2, foreground=_FG, font=("Segoe UI", 10))
+        s.configure("TLabelframe", background=_BG2, bordercolor=_BORD,
+                    lightcolor=_BORD, darkcolor=_BORD, relief="groove")
+        s.configure("TLabelframe.Label", background=_BG2, foreground=_FG2,
+                    font=("Segoe UI", 9))
+        s.configure("TEntry",
+            fieldbackground=_BG3, foreground=_FG, insertcolor=_FG,
+            bordercolor=_BORD, lightcolor=_BORD, darkcolor=_BORD,
+            font=("Segoe UI", 10))
+        s.configure("TCombobox",
+            fieldbackground=_BG3, foreground=_FG, background=_BG2,
+            arrowcolor=_FG, bordercolor=_BORD, lightcolor=_BORD, darkcolor=_BORD,
+            selectbackground=_SEL, selectforeground=_FG,
+            font=("Segoe UI", 10))
+        s.map("TCombobox",
+            fieldbackground=[("readonly", _BG3), ("disabled", _BG2)],
+            foreground=[("disabled", _FG2)],
+            selectbackground=[("readonly", _SEL)])
+        s.configure("TSpinbox",
+            fieldbackground=_BG3, foreground=_FG, background=_BG2,
+            arrowcolor=_FG, bordercolor=_BORD, lightcolor=_BORD, darkcolor=_BORD,
+            insertcolor=_FG, font=("Segoe UI", 10))
+        s.configure("TCheckbutton", background=_BG2, foreground=_FG)
+        s.map("TCheckbutton",
+            background=[("active", _BG2)],
+            indicatorcolor=[("selected", "#24acf2"), ("", _BG3)])
+        s.configure("TRadiobutton", background=_BG2, foreground=_FG)
+        s.map("TRadiobutton",
+            background=[("active", _BG2)],
+            indicatorcolor=[("selected", "#24acf2"), ("", _BG3)])
+        s.configure("TSeparator", background=_BORD)
+        s.configure("TScrollbar",
+            background=_BG2, troughcolor=_BG, arrowcolor=_FG2,
+            bordercolor=_BG, lightcolor=_BG2, darkcolor=_BG2)
+        s.map("TScrollbar", background=[("active", "#5A5A5A")])
+        s.configure("TNotebook", background=_BG2, bordercolor=_BORD, tabmargins=[0,0,0,0])
+        s.configure("TNotebook.Tab",
+            background=_BG2, foreground=_FG2,
+            padding=[12, 5], bordercolor=_BORD,
+            font=("Segoe UI", 10))
+        s.map("TNotebook.Tab",
+            background=[("selected", _BG2), ("active", "#2A2D2E")],
+            foreground=[("selected", _FG), ("active", _FG)])
+        # primary action button
+        _BTN = "#24acf2"
+        _BTN_HV = "#1a9de0"
+        s.configure("Teal.TButton",
+            font=("Segoe UI", 10, "bold"), foreground="white",
+            background=_BTN, padding=[10, 6], relief="flat",
+            borderwidth=0, focusthickness=0,
+            bordercolor=_BTN, lightcolor=_BTN, darkcolor=_BTN)
+        s.map("Teal.TButton",
+            background=[("active", _BTN_HV), ("disabled", "#555555")],
+            bordercolor=[("active", _BTN_HV), ("disabled", "#555555")])
+        # destructive / disconnect button
+        s.configure("Red.TButton",
+            font=("Segoe UI", 10, "bold"), foreground="white",
+            background="#C53030", padding=[10, 6], relief="flat",
+            borderwidth=0, focusthickness=0,
+            bordercolor="#C53030", lightcolor="#C53030", darkcolor="#C53030")
+        s.map("Red.TButton",
+            background=[("active", "#9B2C2C")],
+            bordercolor=[("active", "#9B2C2C")])
+        # Combobox dropdown listbox (tk.Listbox, not themed by ttk)
+        self.root.option_add("*TCombobox*Listbox.background",       _BG3)
+        self.root.option_add("*TCombobox*Listbox.foreground",       _FG)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", _SEL)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", _FG)
+        self.root.option_add("*TCombobox*Listbox.relief",           "flat")
+        self.root.option_add("*TCombobox*Listbox.borderWidth",      "0")
 
     def _build_connection_frame(self):
         outer = ttk.LabelFrame(self.root, text="Connection", padding=(10, 6))
@@ -196,7 +316,7 @@ class EGMod:
         r0.pack(fill="x")
 
         ttk.Label(r0, text="Port:").pack(side="left")
-        self.port_cb = ttk.Combobox(r0, width=9, state="readonly")
+        self.port_cb = ttk.Combobox(r0, width=30, state="readonly")
         self.port_cb.pack(side="left", padx=(2, 4))
         ttk.Button(r0, text="⟳", style="Teal.TButton", width=2,
                    command=self.refresh_ports).pack(side="left", padx=(0, 10))
@@ -265,12 +385,17 @@ class EGMod:
         self._adv_visible = not self._adv_visible
 
     def refresh_ports(self):
-        ports = [p.device for p in serial.tools.list_ports.comports()]
-        current = self.port_cb.get()
-        self.port_cb["values"] = ports
-        if not ports:
+        port_info = serial.tools.list_ports.comports()
+        self._port_map = {_port_label(p): p.device for p in port_info}
+        labels = list(self._port_map.keys())
+        devices = list(self._port_map.values())
+        current_device = self._port_map.get(self.port_cb.get(), self.port_cb.get())
+        self.port_cb["values"] = labels
+        if not labels:
             self.port_cb.set(""); return
-        self.port_cb.set(current if current in ports else get_lowest_com(ports))
+        best_device = current_device if current_device in devices else get_lowest_com(devices)
+        best_label = next((l for l, d in self._port_map.items() if d == best_device), labels[0])
+        self.port_cb.set(best_label)
 
     def _toggle_connect(self):
         self._disconnect() if self.connected else self._connect()
@@ -278,7 +403,7 @@ class EGMod:
     def _connect(self):
         if not PYMODBUS_OK:
             messagebox.showerror("Missing library", "pymodbus is not installed."); return
-        port = self.port_cb.get().strip()
+        port = self._port_map.get(self.port_cb.get(), self.port_cb.get()).strip()
         if not port:
             messagebox.showwarning("No port", "Select a COM port first."); return
         try:
@@ -352,6 +477,10 @@ class EGMod:
             self._serial_monitor.lift(); return
         title = f"Serial Monitor \u2014 {self.connected_port}" if self.connected else "Serial Monitor"
         self._serial_monitor = SerialMonitor(self.root, title=title)
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + self.root.winfo_width() + 6
+        y = self.root.winfo_y()
+        self._serial_monitor.geometry(f"+{x}+{y}")
 
     def _wrap_serial(self):
         sock = getattr(self.client, "socket", None)
@@ -396,7 +525,7 @@ class EGMod:
         nb.add(f, text="Generic")
         self._build_generic_tab(f)
         f2 = ttk.Frame(nb, padding=12)
-        nb.add(f2, text="Addr Assign")
+        nb.add(f2, text="Custom")
         self._build_addr_tab(f2)
 
     def _build_addr_tab(self, frm):
@@ -476,8 +605,12 @@ class EGMod:
             p[0] = new
         self._addr_reg_fmt.bind("<<ComboboxSelected>>", _on_reg_fmt)
         ttk.Label(cfg, text="(holding register that stores the slave address)",
-                  foreground="#718096").grid(row=1, column=3, columnspan=3,
+                  foreground=_FG2).grid(row=1, column=3, columnspan=3,
                   sticky="w", pady=(10,0))
+
+        self._bind_fmt_scroll(self._addr_cur_entry, self._addr_cur_fmt, 1, 247)
+        self._bind_fmt_scroll(self._addr_new_entry, self._addr_new_fmt, 1, 247)
+        self._bind_fmt_scroll(self._addr_reg_entry, self._addr_reg_fmt, 0, 65535)
 
         btn_row = ttk.Frame(frm)
         btn_row.pack(fill="x", pady=(12,6))
@@ -486,13 +619,159 @@ class EGMod:
                                         command=self._do_addr_set)
         self._addr_set_btn.pack(side="left", padx=(0,14))
         self._addr_dot = tk.Label(btn_row, text="\u25cf", font=("Segoe UI", 14),
-                                  foreground="#CBD5E0", bg=self.root.cget("bg"))
+                                  foreground="#CBD5E0", bg=_BG2)
         self._addr_dot.pack(side="left", padx=(0,4))
-        self._addr_status = ttk.Label(btn_row, text="Idle", foreground="#718096")
+        self._addr_status = ttk.Label(btn_row, text="Idle", foreground=_FG2)
         self._addr_status.pack(side="left")
 
-        self._addr_log = scrolledtext.ScrolledText(frm, height=8, font=("Consolas", 9))
+        # ── Change Register Value ────────────────────────────────────
+        chg = ttk.LabelFrame(frm, text="Change Register Value", padding=12)
+        chg.pack(fill="x", pady=(8,0))
+
+        # Slave Address
+        ttk.Label(chg, text="Slave Address:").grid(row=0, column=0, sticky="w", padx=(0,4))
+        self._chg_slave_fmt = ttk.Combobox(chg, values=["Decimal","Hex"],
+                                            width=8, state="readonly")
+        self._chg_slave_fmt.set("Decimal")
+        self._chg_slave_fmt.grid(row=0, column=2, sticky="w", padx=(4,20))
+        self._chg_slave_spin = ttk.Spinbox(chg, from_=1, to=247, width=9)
+        self._chg_slave_spin.set("1")
+        self._chg_slave_spin.config(validate="all", validatecommand=make_vcmd(self._chg_slave_fmt))
+        self._chg_slave_spin.grid(row=0, column=1, sticky="w")
+        _cslave_p = ["Decimal"]
+        def _on_cslave_fmt(e, p=_cslave_p):
+            old = p[0]; new = self._chg_slave_fmt.get()
+            if old != new: reformat(self._chg_slave_spin, old, new)
+            p[0] = new
+        self._chg_slave_fmt.bind("<<ComboboxSelected>>", _on_cslave_fmt)
+
+        # Data Register
+        ttk.Label(chg, text="Data Register:").grid(row=0, column=3, sticky="w", padx=(0,4))
+        self._chg_reg_fmt = ttk.Combobox(chg, values=["Decimal","Hex"],
+                                          width=8, state="readonly")
+        self._chg_reg_fmt.set("Decimal")
+        self._chg_reg_fmt.grid(row=0, column=5, sticky="w", padx=(4,0))
+        self._chg_reg_spin = ttk.Spinbox(chg, from_=0, to=65535, width=9)
+        self._chg_reg_spin.set("0")
+        self._chg_reg_spin.config(validate="all", validatecommand=make_vcmd(self._chg_reg_fmt))
+        self._chg_reg_spin.grid(row=0, column=4, sticky="w")
+        _creg_p = ["Decimal"]
+        def _on_creg_fmt(e, p=_creg_p):
+            old = p[0]; new = self._chg_reg_fmt.get()
+            if old != new: reformat(self._chg_reg_spin, old, new)
+            p[0] = new
+        self._chg_reg_fmt.bind("<<ComboboxSelected>>", _on_creg_fmt)
+
+        # Value
+        ttk.Label(chg, text="Value:").grid(row=1, column=0, sticky="w", padx=(0,4), pady=(10,0))
+        self._chg_val_fmt = ttk.Combobox(chg, values=["Decimal","Hex"],
+                                          width=8, state="readonly")
+        self._chg_val_fmt.set("Decimal")
+        self._chg_val_fmt.grid(row=1, column=2, sticky="w", padx=(4,20), pady=(10,0))
+        self._chg_val_spin = ttk.Spinbox(chg, from_=0, to=65535, width=9)
+        self._chg_val_spin.set("0")
+        self._chg_val_spin.config(validate="all", validatecommand=make_vcmd(self._chg_val_fmt))
+        self._chg_val_spin.grid(row=1, column=1, sticky="w", pady=(10,0))
+        _cval_p = ["Decimal"]
+        def _on_cval_fmt(e, p=_cval_p):
+            old = p[0]; new = self._chg_val_fmt.get()
+            if old != new: reformat(self._chg_val_spin, old, new)
+            p[0] = new
+        self._chg_val_fmt.bind("<<ComboboxSelected>>", _on_cval_fmt)
+
+        self._bind_fmt_scroll(self._chg_slave_spin, self._chg_slave_fmt, 1, 247)
+        self._bind_fmt_scroll(self._chg_reg_spin,   self._chg_reg_fmt,   0, 65535)
+        self._bind_fmt_scroll(self._chg_val_spin,   self._chg_val_fmt,   0, 65535)
+
+        chg_btn_row = ttk.Frame(frm)
+        chg_btn_row.pack(fill="x", pady=(8,0))
+        self._chg_btn = ttk.Button(chg_btn_row, text="Write",
+                                    style="Teal.TButton",
+                                    command=self._do_chg_reg)
+        self._chg_btn.pack(side="left", padx=(0,14))
+        self._chg_dot = tk.Label(chg_btn_row, text="\u25cf", font=("Segoe UI", 14),
+                                  foreground="#CBD5E0", bg=_BG2)
+        self._chg_dot.pack(side="left", padx=(0,4))
+        self._chg_status = ttk.Label(chg_btn_row, text="Idle", foreground=_FG2)
+        self._chg_status.pack(side="left")
+
+        # ── Save Command ─────────────────────────────────────────────
+        sav = ttk.LabelFrame(frm, text="Save Command", padding=12)
+        sav.pack(fill="x", pady=(8,0))
+
+        # Slave Address
+        ttk.Label(sav, text="Slave Address:").grid(row=0, column=0, sticky="w", padx=(0,4))
+        self._save_slave_fmt = ttk.Combobox(sav, values=["Decimal","Hex"],
+                                            width=8, state="readonly")
+        self._save_slave_fmt.set("Decimal")
+        self._save_slave_fmt.grid(row=0, column=2, sticky="w", padx=(4,20))
+        self._save_slave_spin = ttk.Spinbox(sav, from_=1, to=247, width=9)
+        self._save_slave_spin.set("1")
+        self._save_slave_spin.config(validate="all", validatecommand=make_vcmd(self._save_slave_fmt))
+        self._save_slave_spin.grid(row=0, column=1, sticky="w")
+        _sslave_p = ["Decimal"]
+        def _on_sslave_fmt(e, p=_sslave_p):
+            old = p[0]; new = self._save_slave_fmt.get()
+            if old != new: reformat(self._save_slave_spin, old, new)
+            p[0] = new
+        self._save_slave_fmt.bind("<<ComboboxSelected>>", _on_sslave_fmt)
+
+        # Save Register
+        ttk.Label(sav, text="Save Register:").grid(row=0, column=3, sticky="w", padx=(0,4))
+        self._save_reg_fmt = ttk.Combobox(sav, values=["Decimal","Hex"],
+                                          width=8, state="readonly")
+        self._save_reg_fmt.set("Decimal")
+        self._save_reg_fmt.grid(row=0, column=5, sticky="w", padx=(4,0))
+        self._save_reg_spin = ttk.Spinbox(sav, from_=0, to=65535, width=9)
+        self._save_reg_spin.set("0")
+        self._save_reg_spin.config(validate="all", validatecommand=make_vcmd(self._save_reg_fmt))
+        self._save_reg_spin.grid(row=0, column=4, sticky="w")
+        _sreg_p = ["Decimal"]
+        def _on_sreg_fmt(e, p=_sreg_p):
+            old = p[0]; new = self._save_reg_fmt.get()
+            if old != new: reformat(self._save_reg_spin, old, new)
+            p[0] = new
+        self._save_reg_fmt.bind("<<ComboboxSelected>>", _on_sreg_fmt)
+
+        # Save Value
+        ttk.Label(sav, text="Value:").grid(row=1, column=0, sticky="w", padx=(0,4), pady=(10,0))
+        self._save_val_fmt = ttk.Combobox(sav, values=["Decimal","Hex"],
+                                          width=8, state="readonly")
+        self._save_val_fmt.set("Decimal")
+        self._save_val_fmt.grid(row=1, column=2, sticky="w", padx=(4,20), pady=(10,0))
+        self._save_val_spin = ttk.Spinbox(sav, from_=0, to=65535, width=9)
+        self._save_val_spin.set("0")
+        self._save_val_spin.config(validate="all", validatecommand=make_vcmd(self._save_val_fmt))
+        self._save_val_spin.grid(row=1, column=1, sticky="w", pady=(10,0))
+        _sval_p = ["Decimal"]
+        def _on_sval_fmt(e, p=_sval_p):
+            old = p[0]; new = self._save_val_fmt.get()
+            if old != new: reformat(self._save_val_spin, old, new)
+            p[0] = new
+        self._save_val_fmt.bind("<<ComboboxSelected>>", _on_sval_fmt)
+
+        self._bind_fmt_scroll(self._save_slave_spin, self._save_slave_fmt, 1, 247)
+        self._bind_fmt_scroll(self._save_reg_spin,   self._save_reg_fmt,   0, 65535)
+        self._bind_fmt_scroll(self._save_val_spin,   self._save_val_fmt,   0, 65535)
+
+        sav_btn_row = ttk.Frame(frm)
+        sav_btn_row.pack(fill="x", pady=(8,6))
+        self._save_btn = ttk.Button(sav_btn_row, text="Send Save",
+                                    style="Teal.TButton",
+                                    command=self._do_save_cmd)
+        self._save_btn.pack(side="left", padx=(0,14))
+        self._save_dot = tk.Label(sav_btn_row, text="\u25cf", font=("Segoe UI", 14),
+                                  foreground="#CBD5E0", bg=_BG2)
+        self._save_dot.pack(side="left", padx=(0,4))
+        self._save_status = ttk.Label(sav_btn_row, text="Idle", foreground=_FG2)
+        self._save_status.pack(side="left")
+
+        self._addr_log = scrolledtext.ScrolledText(frm, height=8, font=("Consolas", 9),
+            bg=_BG, fg=_FG, insertbackground=_FG,
+            selectbackground=_SEL, selectforeground=_FG)
         self._addr_log.pack(fill="both", expand=True, pady=(8,0))
+        self._addr_log.vbar.configure(bg=_BG2, troughcolor=_BG, activebackground="#5A5A5A",
+                                      relief="flat", borderwidth=0, highlightthickness=0)
 
     def _do_addr_set(self):
         if not self.connected or not self.client:
@@ -575,6 +854,122 @@ class EGMod:
 
         log(f"\u26a0 No response from address {new} \u2014 device may still have changed")
         finish(False, f"No verify response from {new}")
+
+    def _do_save_cmd(self):
+        if not self.connected or not self.client:
+            self._addr_log.insert(tk.END, "\u26a0 Not connected\n")
+            self._addr_log.see(tk.END); return
+
+        def parse(spin, fmt_cb):
+            raw = spin.get().strip()
+            fmt = fmt_cb.get()
+            if fmt == "Hex": return int(raw, 16)
+            else:            return int(raw)
+
+        try:
+            slave = parse(self._save_slave_spin, self._save_slave_fmt)
+            reg   = parse(self._save_reg_spin,   self._save_reg_fmt)
+            val   = parse(self._save_val_spin,   self._save_val_fmt)
+        except ValueError:
+            self._addr_log.insert(tk.END, "\u26a0 Invalid input\n")
+            self._addr_log.see(tk.END); return
+
+        if not (1 <= slave <= 247):
+            self._addr_log.insert(tk.END, f"\u26a0 Slave {slave} out of range (1\u2013247)\n")
+            self._addr_log.see(tk.END); return
+        if not (0 <= reg <= 65535):
+            self._addr_log.insert(tk.END, f"\u26a0 Register {reg} out of range (0\u201365535)\n")
+            self._addr_log.see(tk.END); return
+        self._save_btn.config(state="disabled")
+        self._save_dot.config(foreground="#ECC94B")
+        self._save_status.config(text="Sending...", foreground="#744210")
+        threading.Thread(target=self._save_cmd_worker,
+                         args=(slave, reg, val), daemon=True).start()
+
+    def _save_cmd_worker(self, slave, reg, val):
+        def log(msg):
+            self.root.after(0, lambda m=msg: (
+                self._addr_log.insert(tk.END, m + "\n"),
+                self._addr_log.see(tk.END)))
+
+        def finish(ok, text):
+            self.root.after(0, lambda: (
+                self._save_dot.config(foreground="green" if ok else "red"),
+                self._save_status.config(text=text,
+                    foreground="#276749" if ok else "#C53030"),
+                self._save_btn.config(state="normal")))
+
+        log(f"\u27a4 Save  slave={slave}  reg={reg}  value={val}")
+        try:
+            r = self.client.write_register(reg, val, **{_SLAVE_KW: slave})
+            if hasattr(r, "isError") and r.isError():
+                log(f"\u274c Save error: {r}")
+                finish(False, "Save failed"); return
+            log(f"\u2705 Save command sent")
+            finish(True, "Saved")
+        except Exception as e:
+            log(f"\u274c Could not send save command: {e}")
+            finish(False, "Save failed")
+
+    def _do_chg_reg(self):
+        if not self.connected or not self.client:
+            self._addr_log.insert(tk.END, "\u26a0 Not connected\n")
+            self._addr_log.see(tk.END); return
+
+        def parse(spin, fmt_cb):
+            raw = spin.get().strip()
+            fmt = fmt_cb.get()
+            if fmt == "Hex": return int(raw, 16)
+            else:            return int(raw)
+
+        try:
+            slave = parse(self._chg_slave_spin, self._chg_slave_fmt)
+            reg   = parse(self._chg_reg_spin,   self._chg_reg_fmt)
+            val   = parse(self._chg_val_spin,   self._chg_val_fmt)
+        except ValueError:
+            self._addr_log.insert(tk.END, "\u26a0 Invalid input\n")
+            self._addr_log.see(tk.END); return
+
+        if not (1 <= slave <= 247):
+            self._addr_log.insert(tk.END, f"\u26a0 Slave {slave} out of range (1\u2013247)\n")
+            self._addr_log.see(tk.END); return
+        if not (0 <= reg <= 65535):
+            self._addr_log.insert(tk.END, f"\u26a0 Register {reg} out of range (0\u201365535)\n")
+            self._addr_log.see(tk.END); return
+        if not (0 <= val <= 65535):
+            self._addr_log.insert(tk.END, f"\u26a0 Value {val} out of range (0\u201365535)\n")
+            self._addr_log.see(tk.END); return
+
+        self._chg_btn.config(state="disabled")
+        self._chg_dot.config(foreground="#ECC94B")
+        self._chg_status.config(text="Writing...", foreground="#744210")
+        threading.Thread(target=self._chg_reg_worker,
+                         args=(slave, reg, val), daemon=True).start()
+
+    def _chg_reg_worker(self, slave, reg, val):
+        def log(msg):
+            self.root.after(0, lambda m=msg: (
+                self._addr_log.insert(tk.END, m + "\n"),
+                self._addr_log.see(tk.END)))
+
+        def finish(ok, text):
+            self.root.after(0, lambda: (
+                self._chg_dot.config(foreground="green" if ok else "red"),
+                self._chg_status.config(text=text,
+                    foreground="#276749" if ok else "#C53030"),
+                self._chg_btn.config(state="normal")))
+
+        log(f"\u27a4 Write  slave={slave}  reg={reg}  value={val}")
+        try:
+            r = self.client.write_register(reg, val, **{_SLAVE_KW: slave})
+            if hasattr(r, "isError") and r.isError():
+                log(f"\u274c Write error: {r}")
+                finish(False, "Write failed"); return
+            log(f"\u2705 Register written")
+            finish(True, "Written")
+        except Exception as e:
+            log(f"\u274c Could not write register: {e}")
+            finish(False, "Write failed")
 
     def _build_generic_tab(self, frm):
         ctrl = ttk.Frame(frm)
@@ -663,6 +1058,9 @@ class EGMod:
             p[0] = new
         self.addr_fmt.bind("<<ComboboxSelected>>", _on_afmt)
 
+        self._bind_fmt_scroll(self.slave_spin, self.slave_fmt, 1, 247)
+        self._bind_fmt_scroll(self.addr_spin,  self.addr_fmt,  0, 65535)
+
         count_vcmd = (ctrl.register(lambda a, p: a != "1" or not p or p.isdigit()), "%d", "%P")
         self.count_spin.config(validate="all", validatecommand=count_vcmd)
 
@@ -706,7 +1104,7 @@ class EGMod:
 
         cell_frame = ttk.LabelFrame(frm, text="Cells", padding=8)
         cell_frame.pack(fill="both", expand=True)
-        self._cell_canvas = tk.Canvas(cell_frame, highlightthickness=0, height=180, bg="#F7FAFC")
+        self._cell_canvas = tk.Canvas(cell_frame, highlightthickness=0, height=180, bg=_BG)
         self._cell_canvas.pack(side="left", fill="both", expand=True)
         vsb = ttk.Scrollbar(cell_frame, orient="vertical", command=self._cell_canvas.yview)
         vsb.pack(side="right", fill="y")
@@ -721,8 +1119,12 @@ class EGMod:
         self._cell_values = []
         self._rebuild_cells()
 
-        self._log = scrolledtext.ScrolledText(frm, height=5, font=("Consolas", 9))
+        self._log = scrolledtext.ScrolledText(frm, height=5, font=("Consolas", 9),
+            bg=_BG, fg=_FG, insertbackground=_FG,
+            selectbackground=_SEL, selectforeground=_FG)
         self._log.pack(fill="x", pady=(8,0))
+        self._log.vbar.configure(bg=_BG2, troughcolor=_BG, activebackground="#5A5A5A",
+                                 relief="flat", borderwidth=0, highlightthickness=0)
 
     CELLS_PER_ROW = 10
 
@@ -746,18 +1148,19 @@ class EGMod:
         for i in range(count):
             col = i % C; base_row = (i // C) * 2; addr = start + i
             hdr = tk.Label(self._cell_inner, text=str(addr),
-                           font=("Consolas", 8), bg="#2D3748", fg="white",
+                           font=("Consolas", 8), bg=_CELL_HDR_BG, fg=_CELL_HDR_FG,
                            width=8, anchor="center", relief="flat", pady=2)
             hdr.grid(row=base_row, column=col, padx=1, pady=(2,0), sticky="nsew")
             if write_mode:
                 val = tk.Entry(self._cell_inner, font=("Consolas", 10, "bold"),
-                               bg="#FFFBEB", fg="#744210", width=8,
-                               justify="center", relief="groove")
+                               bg=_CELL_WR_BG, fg=_CELL_WR_FG, width=8,
+                               insertbackground=_FG, selectbackground=_SEL,
+                               justify="center", relief="flat")
                 val.insert(0, "0")
             else:
                 val = tk.Label(self._cell_inner, text="—",
-                               font=("Consolas", 10, "bold"), bg="#EDF2F7", fg="#2D3748",
-                               width=8, anchor="center", relief="groove", pady=4)
+                               font=("Consolas", 10, "bold"), bg=_CELL_VAL_BG, fg=_CELL_VAL_FG,
+                               width=8, anchor="center", relief="flat", pady=4)
             val.grid(row=base_row+1, column=col, padx=1, pady=(0,2), sticky="nsew")
             self._cell_labels.append((hdr, val))
 
