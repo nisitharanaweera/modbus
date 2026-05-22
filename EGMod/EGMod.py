@@ -199,6 +199,7 @@ class EGMod:
         self.connected_port = None
         self._serial_monitor = None
         self._port_map = {}  # label -> device
+        self._scan_running = False
         self._orig_serial_read = None
         self._orig_serial_write = None
         self._apply_style()
@@ -307,6 +308,18 @@ class EGMod:
         self.root.option_add("*TCombobox*Listbox.selectForeground", _FG)
         self.root.option_add("*TCombobox*Listbox.relief",           "flat")
         self.root.option_add("*TCombobox*Listbox.borderWidth",      "0")
+        # Treeview dark theme
+        s.configure("Treeview",
+            background=_BG2, foreground=_FG, fieldbackground=_BG2,
+            bordercolor=_BORD, rowheight=24)
+        s.map("Treeview",
+            background=[("selected", _SEL)],
+            foreground=[("selected", _FG)])
+        s.configure("Treeview.Heading",
+            background=_BG3, foreground=_FG2, relief="flat",
+            bordercolor=_BORD)
+        s.map("Treeview.Heading",
+            background=[("active", _BG3)])
 
     def _build_connection_frame(self):
         outer = ttk.LabelFrame(self.root, text="Connection", padding=(10, 6))
@@ -326,21 +339,25 @@ class EGMod:
             values=["1200","2400","4800","9600","19200","38400","57600","115200"])
         self.baud_cb.set("9600")
         self.baud_cb.pack(side="left", padx=(2, 10))
+        self.baud_cb.bind("<<ComboboxSelected>>", lambda e: self._on_param_change())
 
         ttk.Label(r0, text="Data bits:").pack(side="left")
         self.databits_cb = ttk.Combobox(r0, width=3, state="readonly", values=["5","6","7","8"])
         self.databits_cb.set("8")
         self.databits_cb.pack(side="left", padx=(2, 10))
+        self.databits_cb.bind("<<ComboboxSelected>>", lambda e: self._on_param_change())
 
         ttk.Label(r0, text="Stop bits:").pack(side="left")
         self.stopbits_cb = ttk.Combobox(r0, width=4, state="readonly", values=["1","1.5","2"])
         self.stopbits_cb.set("1")
         self.stopbits_cb.pack(side="left", padx=(2, 10))
+        self.stopbits_cb.bind("<<ComboboxSelected>>", lambda e: self._on_param_change())
 
         ttk.Label(r0, text="Parity:").pack(side="left")
         self.parity_cb = ttk.Combobox(r0, width=4, state="readonly", values=["N","E","O","M","S"])
         self.parity_cb.set("N")
         self.parity_cb.pack(side="left", padx=(2, 10))
+        self.parity_cb.bind("<<ComboboxSelected>>", lambda e: self._on_param_change())
 
         ttk.Label(r0, text="Line end:").pack(side="left")
         self.lineend_cb = ttk.Combobox(r0, width=7, state="readonly",
@@ -373,6 +390,12 @@ class EGMod:
         self.status_lbl.pack(side="left", padx=(4, 0))
         ttk.Button(r1, text="\u238a  Monitor", style="Teal.TButton",
                    command=self._open_monitor).pack(side="right")
+        ttk.Separator(r1, orient="vertical").pack(side="right", fill="y", padx=(10, 10))
+        self.comms_lbl = ttk.Label(r1, text="\u2014", foreground=_FG2)
+        self.comms_lbl.pack(side="right", padx=(4, 0))
+        self.comms_dot = ttk.Label(r1, text="\u25cf", foreground=_FG2, font=("Segoe UI", 14))
+        self.comms_dot.pack(side="right")
+        ttk.Label(r1, text="Comms:").pack(side="right", padx=(10, 4))
         self.refresh_ports()
 
     def _toggle_advanced(self):
@@ -397,6 +420,11 @@ class EGMod:
         best_label = next((l for l, d in self._port_map.items() if d == best_device), labels[0])
         self.port_cb.set(best_label)
 
+    def _on_param_change(self):
+        if self.connected:
+            self._disconnect()
+            self._connect()
+
     def _toggle_connect(self):
         self._disconnect() if self.connected else self._connect()
 
@@ -411,7 +439,8 @@ class EGMod:
             kwargs = dict(port=port, baudrate=int(self.baud_cb.get()),
                           bytesize=int(self.databits_cb.get()),
                           stopbits=stop_map.get(self.stopbits_cb.get(), 1),
-                          parity=self.parity_cb.get(), timeout=1)
+                          parity=self.parity_cb.get(), timeout=1,
+                          retries=0)
             try:
                 self.client = ModbusSerialClient(method="rtu", **kwargs)
             except TypeError:
@@ -427,6 +456,7 @@ class EGMod:
                 self.connected = True
                 self.connected_port = port
                 self._set_status(True, f"Connected  [{port}]")
+                self._set_comms(None)
                 self.connect_btn.config(text="Disconnect", style="Red.TButton")
                 self._wrap_serial()
                 if self._serial_monitor and self._serial_monitor.winfo_exists():
@@ -449,10 +479,23 @@ class EGMod:
         self.connected_port = None
         self.connect_btn.config(text="Connect", style="Teal.TButton")
         self._set_status(False, "Connection lost!" if lost else "Disconnected")
+        self._set_comms(None)
+        self._scan_running = False
 
     def _set_status(self, ok, text=""):
         self.status_dot.config(foreground="green" if ok else "red")
         self.status_lbl.config(text=text)
+
+    def _set_comms(self, ok, text=""):
+        if ok is None:
+            self.comms_dot.config(foreground=_FG2)
+            self.comms_lbl.config(text="\u2014", foreground=_FG2)
+        elif ok:
+            self.comms_dot.config(foreground="green")
+            self.comms_lbl.config(text=text or "OK", foreground="#276749")
+        else:
+            self.comms_dot.config(foreground="red")
+            self.comms_lbl.config(text=text or "Comm Error", foreground="#C53030")
 
     def _start_monitor(self):
         threading.Thread(target=self._monitor_loop, daemon=True).start()
@@ -527,6 +570,9 @@ class EGMod:
         f2 = ttk.Frame(nb, padding=12)
         nb.add(f2, text="Custom")
         self._build_addr_tab(f2)
+        f3 = ttk.Frame(nb, padding=12)
+        nb.add(f3, text="Scan")
+        self._build_scan_tab(f3)
 
     def _build_addr_tab(self, frm):
         cfg = ttk.LabelFrame(frm, text="Change Slave Address", padding=12)
@@ -971,6 +1017,233 @@ class EGMod:
             log(f"\u274c Could not write register: {e}")
             finish(False, "Write failed")
 
+    def _build_scan_tab(self, frm):
+        # ── Scan Range ───────────────────────────────────────────────────
+        rng = ttk.LabelFrame(frm, text="Scan Range", padding=12)
+        rng.pack(fill="x")
+        ttk.Label(rng, text="From:").grid(row=0, column=0, sticky="w", padx=(0,4))
+        self._scan_from_spin = ttk.Spinbox(rng, from_=1, to=247, width=6)
+        self._scan_from_spin.set("1")
+        self._scan_from_spin.grid(row=0, column=1, sticky="w", padx=(0,20))
+        ttk.Label(rng, text="To:").grid(row=0, column=2, sticky="w", padx=(0,4))
+        self._scan_to_spin = ttk.Spinbox(rng, from_=1, to=247, width=6)
+        self._scan_to_spin.set("247")
+        self._scan_to_spin.grid(row=0, column=3, sticky="w", padx=(0,20))
+        ttk.Label(rng, text="Timeout per probe (ms):").grid(row=0, column=4, sticky="w", padx=(0,4))
+        self._scan_timeout_spin = ttk.Spinbox(rng, from_=100, to=5000, increment=100, width=6)
+        self._scan_timeout_spin.set("500")
+        self._scan_timeout_spin.grid(row=0, column=5, sticky="w")
+
+        # ── Baud Rates ──────────────────────────────────────────────────
+        baud_frm = ttk.LabelFrame(frm, text="Baud Rates", padding=12)
+        baud_frm.pack(fill="x", pady=(8,0))
+        self._scan_baud_vars = {}
+        for i, br in enumerate(["1200","2400","4800","9600","19200","38400","57600","115200"]):
+            var = tk.BooleanVar(value=False)
+            self._scan_baud_vars[br] = var
+            ttk.Checkbutton(baud_frm, text=br, variable=var).grid(row=0, column=i, padx=(0,12), sticky="w")
+
+        # ── Parity ───────────────────────────────────────────────────────
+        par_frm = ttk.LabelFrame(frm, text="Parity", padding=12)
+        par_frm.pack(fill="x", pady=(8,0))
+        self._scan_parity_vars = {}
+        for i, (par, lbl) in enumerate([("N","None (N)"),("E","Even (E)"),("O","Odd (O)")]):
+            var = tk.BooleanVar(value=False)
+            self._scan_parity_vars[par] = var
+            ttk.Checkbutton(par_frm, text=lbl, variable=var).grid(row=0, column=i, padx=(0,20), sticky="w")
+
+        # ── Stop Bits ───────────────────────────────────────────────────
+        stop_frm = ttk.LabelFrame(frm, text="Stop Bits", padding=12)
+        stop_frm.pack(fill="x", pady=(8,0))
+        self._scan_stop_vars = {}
+        for i, sb in enumerate(["1","1.5","2"]):
+            var = tk.BooleanVar(value=False)
+            self._scan_stop_vars[sb] = var
+            ttk.Checkbutton(stop_frm, text=sb, variable=var).grid(row=0, column=i, padx=(0,20), sticky="w")
+
+        self._scan_pretick()
+
+        # ── Progress ───────────────────────────────────────────────────
+        prog_row = ttk.Frame(frm)
+        prog_row.pack(fill="x", pady=(12,0))
+        self._scan_btn = ttk.Button(prog_row, text="Start Scan", style="Teal.TButton",
+                                    command=self._do_scan)
+        self._scan_btn.pack(side="left", padx=(0,12))
+        self._scan_progress = ttk.Progressbar(prog_row, mode="determinate", length=220)
+        self._scan_progress.pack(side="left", padx=(0,10))
+        self._scan_prog_lbl = ttk.Label(prog_row, text="", foreground=_FG2)
+        self._scan_prog_lbl.pack(side="left")
+
+        # ── Results ────────────────────────────────────────────────────
+        res_frm = ttk.Frame(frm)
+        res_frm.pack(fill="both", expand=True, pady=(12,0))
+        cols = ("addr_dec","addr_hex","baud","parity","stopbits","response")
+        self._scan_tree = ttk.Treeview(res_frm, columns=cols, show="headings", height=6)
+        for col, hdr, w in [
+                ("addr_dec","Addr (dec)",85), ("addr_hex","Addr (hex)",85),
+                ("baud","Baud",80), ("parity","Parity",65), ("stopbits","Stop bits",70),
+                ("response","Response",220)]:
+            self._scan_tree.heading(col, text=hdr)
+            self._scan_tree.column(col, width=w, anchor="center")
+        self._scan_tree.tag_configure("found", background="#1A3A2A", foreground="#9CD49C")
+        tree_vs = ttk.Scrollbar(res_frm, orient="vertical", command=self._scan_tree.yview)
+        self._scan_tree.configure(yscrollcommand=tree_vs.set)
+        self._scan_tree.pack(side="left", fill="both", expand=True)
+        tree_vs.pack(side="right", fill="y")
+
+        # ── Log ────────────────────────────────────────────────────────
+        self._scan_log = scrolledtext.ScrolledText(frm, height=6, font=("Consolas", 9),
+            bg=_BG, fg=_FG, insertbackground=_FG,
+            selectbackground=_SEL, selectforeground=_FG)
+        self._scan_log.pack(fill="x", pady=(8,0))
+        self._scan_log.vbar.configure(bg=_BG2, troughcolor=_BG, activebackground="#5A5A5A",
+                                      relief="flat", borderwidth=0, highlightthickness=0)
+
+    def _scan_pretick(self):
+        cur_baud = self.baud_cb.get()
+        if cur_baud in self._scan_baud_vars:
+            self._scan_baud_vars[cur_baud].set(True)
+        cur_parity = self.parity_cb.get()
+        if cur_parity in self._scan_parity_vars:
+            self._scan_parity_vars[cur_parity].set(True)
+        cur_stop = self.stopbits_cb.get()
+        if cur_stop in self._scan_stop_vars:
+            self._scan_stop_vars[cur_stop].set(True)
+
+    def _scan_log_msg(self, msg):
+        self._scan_log.insert(tk.END, msg + "\n")
+        self._scan_log.see(tk.END)
+
+    def _do_scan(self):
+        if self._scan_running:
+            self._scan_running = False
+            return
+        if not self.connected or not self.client:
+            self._scan_log_msg("⚠ Not connected — connect to a port first")
+            return
+        bauds    = [b for b, v in self._scan_baud_vars.items()   if v.get()]
+        parities = [p for p, v in self._scan_parity_vars.items() if v.get()]
+        stops    = [s for s, v in self._scan_stop_vars.items()   if v.get()]
+        if not bauds or not parities or not stops:
+            self._scan_log_msg("⚠ Select at least one option in each group"); return
+        try:
+            addr_from  = int(self._scan_from_spin.get())
+            addr_to    = int(self._scan_to_spin.get())
+            timeout_ms = int(self._scan_timeout_spin.get())
+        except ValueError:
+            self._scan_log_msg("⚠ Invalid scan range or timeout value"); return
+        if addr_from > addr_to:
+            self._scan_log_msg("⚠ 'From' must be ≤ 'To'"); return
+        for row in self._scan_tree.get_children():
+            self._scan_tree.delete(row)
+        self._scan_log.delete("1.0", tk.END)
+        combos = [(b, p, s) for b in bauds for p in parities for s in stops]
+        total  = len(combos) * (addr_to - addr_from + 1)
+        self._scan_progress.configure(maximum=total, value=0)
+        self._scan_prog_lbl.config(text="Starting…", foreground=_FG2)
+        self._scan_running = True
+        self._scan_btn.config(text="Stop Scan", style="Red.TButton")
+        threading.Thread(target=self._scan_worker,
+                         args=(combos, addr_from, addr_to, timeout_ms),
+                         daemon=True).start()
+
+    def _scan_worker(self, combos, addr_from, addr_to, timeout_ms):
+        def log(msg):
+            self.root.after(0, lambda m=msg: self._scan_log_msg(m))
+
+        def add_result(addr, baud, parity, stop, response):
+            self.root.after(0, lambda: self._scan_tree.insert(
+                "", "end",
+                values=(str(addr), f"0x{addr:02X}", baud, parity, stop, response),
+                tags=("found",)))
+
+        def set_progress(val, label):
+            self.root.after(0, lambda: (
+                self._scan_progress.configure(value=val),
+                self._scan_prog_lbl.config(text=label, foreground=_FG2)))
+
+        orig_port   = self.connected_port
+        orig_baud   = self.baud_cb.get()
+        orig_parity = self.parity_cb.get()
+        orig_stop   = self.stopbits_cb.get()
+        stop_map    = {"1": 1, "1.5": 1.5, "2": 2}
+        cur_baud, cur_parity, cur_stop = orig_baud, orig_parity, orig_stop
+        step = 0
+        found_count = 0
+
+        def _reconnect(baud, parity, stop, timeout_s):
+            nonlocal cur_baud, cur_parity, cur_stop
+            try:
+                self._unwrap_serial()
+                self.client.close()
+                kw = dict(port=orig_port, baudrate=int(baud),
+                          bytesize=int(self.databits_cb.get()),
+                          stopbits=stop_map.get(stop, 1),
+                          parity=parity, timeout=timeout_s, retries=0)
+                try:    self.client = ModbusSerialClient(method="rtu", **kw)
+                except TypeError: self.client = ModbusSerialClient(**kw)
+                if self.client.connect():
+                    cur_baud, cur_parity, cur_stop = baud, parity, stop
+                    self._wrap_serial()
+                    m = self._serial_monitor
+                    if m and m.winfo_exists():
+                        m.log_info(f"Scan: baud={baud}  parity={parity}  stop={stop}")
+                    return True
+            except Exception as e:
+                log(f"❌ Reconnect error: {e}")
+            return False
+
+        for baud, parity, stop in combos:
+            if not self._scan_running: break
+            if baud != cur_baud or parity != cur_parity or stop != cur_stop:
+                log(f"↻ Connecting: baud={baud}  parity={parity}  stop={stop}")
+                if not _reconnect(baud, parity, stop, timeout_ms / 1000):
+                    log(f"⚠ Skipping baud={baud} par={parity} stop={stop}")
+                    step += (addr_to - addr_from + 1)
+                    set_progress(step, f"Skipped {baud}/{parity}/{stop}")
+                    continue
+            log(f"── Scanning: baud={baud}  parity={parity}  stop={stop} ──")
+            for addr in range(addr_from, addr_to + 1):
+                if not self._scan_running: break
+                set_progress(step, f"baud={baud} par={parity} stop={stop}  addr={addr}")
+                try:
+                    r = self.client.read_holding_registers(0, count=1, **{_SLAVE_KW: addr})
+                    if r is not None:
+                        found_count += 1
+                        if hasattr(r, "isError") and r.isError():
+                            resp = f"Exception code {getattr(r, 'exception_code', '?')}"
+                        else:
+                            regs = getattr(r, "registers", [])
+                            resp = f"OK — reg[0]={regs[0] if regs else '?'}"
+                        log(f"✅ Found  addr={addr}  {baud}/{parity}/{stop}  → {resp}")
+                        add_result(addr, baud, parity, stop, resp)
+                except Exception as e:
+                    log(f"⚠ addr={addr}: {e}")
+                step += 1
+
+        # Restore original connection if settings were changed
+        if cur_baud != orig_baud or cur_parity != orig_parity or cur_stop != orig_stop:
+            log(f"↻ Restoring: baud={orig_baud}  parity={orig_parity}  stop={orig_stop}")
+            if _reconnect(orig_baud, orig_parity, orig_stop, 1.0):
+                log("✅ Original connection restored")
+            else:
+                log("⚠ Could not restore original connection")
+                self.root.after(0, lambda: self._disconnect())
+
+        was_stopped = not self._scan_running
+
+        def _done():
+            self._scan_running = False
+            self._scan_btn.config(text="Start Scan", style="Teal.TButton")
+            if was_stopped:
+                self._scan_prog_lbl.config(text="Stopped", foreground=_FG2)
+            else:
+                self._scan_prog_lbl.config(
+                    text=f"Done — {found_count} device(s) found",
+                    foreground="#276749" if found_count else _FG2)
+
+        self.root.after(0, _done)
+
     def _build_generic_tab(self, frm):
         ctrl = ttk.Frame(frm)
         ctrl.pack(fill="x")
@@ -1008,7 +1281,7 @@ class EGMod:
 
         ttk.Label(ctrl, text="Count:").grid(row=1, column=3, sticky="w", padx=(0,4), pady=(8,0))
         self.count_spin = ttk.Spinbox(ctrl, from_=1, to=125, width=5, command=self._rebuild_cells)
-        self.count_spin.set(10)
+        self.count_spin.set(2)
         self.count_spin.grid(row=1, column=4, sticky="w", padx=(0,20), pady=(8,0))
         self.count_spin.bind("<FocusOut>", lambda e: self._rebuild_cells())
         self.count_spin.bind("<Return>",   lambda e: self._rebuild_cells())
@@ -1132,7 +1405,7 @@ class EGMod:
         for w in self._cell_inner.winfo_children(): w.destroy()
         self._cell_labels = []
         try: count = int(self.count_spin.get())
-        except (ValueError, AttributeError): count = 10
+        except (ValueError, AttributeError): count = 2
         try:
             afmt = self.addr_fmt.get()
             start = int(self.addr_spin.get(), 16 if afmt == "Hex" else 2 if afmt == "Binary" else 10)
@@ -1238,11 +1511,11 @@ class EGMod:
             result = self._read(fc, addr, count, slave)
             if result is None:
                 self.root.after(0, lambda: self._log_msg("⚠ No response — check wiring, address, baud rate"))
-                self.root.after(0, lambda: self._set_status(False, f"No response [{self.connected_port}]"))
+                self.root.after(0, lambda: self._set_comms(False, "No response"))
                 return
             if hasattr(result, "isError") and result.isError():
                 self.root.after(0, lambda r=result: self._log_msg(f"❌ Modbus error: {r}"))
-                self.root.after(0, lambda: self._set_status(False, f"Modbus error [{self.connected_port}]"))
+                self.root.after(0, lambda: self._set_comms(False, "Modbus error"))
                 return
 
             values = getattr(result, "registers", None) or list(getattr(result, "bits", []))
@@ -1256,14 +1529,14 @@ class EGMod:
                 for i, v in enumerate(vals):
                     v_int = int(v); self._cell_values[i] = v_int
                     _, lbl = self._cell_labels[i]
-                    lbl.config(text=to_display(v_int, fmt), bg="#C6F6D5")
+                    lbl.config(text=to_display(v_int, fmt), bg="#093013")
                 self._log_msg(f"✅ FC{fc:02d}  addr={addr}  count={count}  slave={slave}")
-                self._set_status(True, f"Connected  [{self.connected_port}]")
+                self._set_comms(True, "OK")
 
             self.root.after(0, _apply)
         except Exception as e:
             self.root.after(0, lambda e=e: self._log_msg(f"❌ {e}"))
-            self.root.after(0, lambda: self._set_status(False, f"Error [{self.connected_port}]"))
+            self.root.after(0, lambda: self._set_comms(False, "Comm error"))
         finally:
             self._reading = False
 
@@ -1276,10 +1549,7 @@ class EGMod:
         try:
             return fn(addr, count=count, **kw)
         except Exception:
-            try:
-                return fn(addr, count=count)
-            except Exception:
-                return None
+            return None
 
     def _on_fc_change(self, event=None):
         fc_str = self.fc_cb.get()
@@ -1336,16 +1606,18 @@ class EGMod:
         try:
             result = self._write(fc, addr, values, slave)
             if result is None:
-                self._log_msg("⚠ Write returned no response"); return
+                self._log_msg("⚠ Write returned no response")
+                self._set_comms(False, "No response"); return
             if hasattr(result, "isError") and result.isError():
-                self._log_msg(f"❌ Modbus error: {result}"); return
+                self._log_msg(f"❌ Modbus error: {result}")
+                self._set_comms(False, "Modbus error"); return
             for _, widget in self._cell_labels:
                 widget.config(bg="#C6F6D5", fg="#276749")
             self._log_msg(f"✅ FC{fc:02d}  addr={addr}  count={len(values)}  slave={slave}  → {values}")
-            self._set_status(True, f"Connected  [{self.connected_port}]")
+            self._set_comms(True, "OK")
         except Exception as e:
             self._log_msg(f"❌ {e}")
-            self._set_status(False, f"Error [{self.connected_port}]")
+            self._set_comms(False, "Comm error")
 
     def _write(self, fc, addr, values, slave):
         kw = {_SLAVE_KW: slave}
