@@ -4,7 +4,14 @@ import serial.tools.list_ports
 import threading
 import time
 import queue
+import os
+import sys
 from datetime import datetime
+
+def _resource_path(relative):
+    """Resolve a bundled resource path — works in dev and PyInstaller --onefile."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative)
 
 try:
     from pymodbus.client import ModbusSerialClient
@@ -61,6 +68,70 @@ def to_display(value, fmt):
     return str(value)
 
 
+class ToggleSwitch(tk.Frame):
+    """Modern pill-style toggle switch — drop-in for ttk.Checkbutton."""
+    _W, _H = 28, 14   # pill dimensions
+    _KD     = 10       # knob diameter
+    _PAD    =  2       # knob padding inside pill
+
+    def __init__(self, master, text="", variable=None, command=None, **kw):
+        bg = kw.pop("bg", _BG2)
+        super().__init__(master, bg=bg, **kw)
+        self._var  = variable if variable is not None else tk.BooleanVar()
+        self._cmd  = command
+        self._hover = False
+
+        self._cv = tk.Canvas(self, width=self._W, height=self._H,
+                             bg=bg, highlightthickness=0, cursor="hand2")
+        self._cv.pack(side="left", padx=(0, 5))
+
+        if text:
+            self._lbl = tk.Label(self, text=text, bg=bg, fg=_FG,
+                                 font=("Segoe UI", 10), cursor="hand2")
+            self._lbl.pack(side="left")
+        else:
+            self._lbl = None
+
+        for w in [self._cv] + ([self._lbl] if self._lbl else []) + [self]:
+            w.bind("<Button-1>", self._toggle)
+            w.bind("<Enter>",    lambda e: self._set_hover(True))
+            w.bind("<Leave>",    lambda e: self._set_hover(False))
+
+        self._var.trace_add("write", lambda *_: self._draw())
+        self._draw()
+
+    def _draw(self):
+        cv = self._cv
+        cv.delete("all")
+        on = self._var.get()
+        W, H, KD, P = self._W, self._H, self._KD, self._PAD
+        r = H // 2
+
+        track  = "#055419" if on else (_BG3 if not self._hover else "#4A4A4A")
+        border = "#055419" if (on or self._hover) else _BORD
+
+        cv.create_oval(0, 0, H, H, fill=track, outline=border, width=1)
+        cv.create_oval(W-H, 0, W, H, fill=track, outline=border, width=1)
+        cv.create_rectangle(r, 0, W-r, H, fill=track, outline=track)
+        cv.create_line(r, 1, W-r, 1, fill=border)
+        cv.create_line(r, H-1, W-r, H-1, fill=border)
+
+        kx = (W - P - KD) if on else P
+        knob_fill   = "white" if on else _FG2
+        knob_border = "white" if on else _BORD
+        cv.create_oval(kx, P, kx+KD, P+KD,
+                       fill=knob_fill, outline=knob_border, width=1)
+
+    def _toggle(self, _=None):
+        self._var.set(not self._var.get())
+        if self._cmd:
+            self._cmd()
+
+    def _set_hover(self, state):
+        self._hover = state
+        self._draw()
+
+
 class SerialMonitor(tk.Toplevel):
     def __init__(self, parent, title="Serial Monitor"):
         super().__init__(parent)
@@ -77,13 +148,22 @@ class SerialMonitor(tk.Toplevel):
         self._rx_timer = None
         self._build_ui()
         self._poll()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        with self._rx_lock:
+            if self._rx_timer:
+                self._rx_timer.cancel()
+                self._rx_timer = None
+        self.destroy()
 
     def _build_ui(self):
         self.configure(bg=_BG)
         bar = ttk.Frame(self, padding=(6, 4, 6, 0))
         bar.pack(fill="x")
-        ttk.Checkbutton(bar, text="Timestamp", variable=self._ts_var,
-                        command=self._rerender).pack(side="left", padx=(0, 12))
+        ttk.Label(bar, text="Timestamp:").pack(side="left", padx=(0, 4))
+        ToggleSwitch(bar, variable=self._ts_var,
+                     command=self._rerender).pack(side="left", padx=(0, 12))
         ttk.Label(bar, text="Format:").pack(side="left", padx=(0, 4))
         for fmt in ("Text", "Hex", "Binary"):
             ttk.Radiobutton(bar, text=fmt, variable=self._fmt_var,
@@ -134,6 +214,8 @@ class SerialMonitor(tk.Toplevel):
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         self._q.put(("INFO", msg, ts))
 
+    _MAX_ENTRIES = 2000
+
     def _poll(self):
         if not self.winfo_exists():
             return
@@ -142,6 +224,11 @@ class SerialMonitor(tk.Toplevel):
                 item = self._q.get_nowait()
                 self._entries.append(item)
                 self._write_entry(*item)
+                if len(self._entries) > self._MAX_ENTRIES:
+                    del self._entries[:200]
+                    self._txt.config(state="normal")
+                    self._txt.delete("1.0", "201.0")
+                    self._txt.config(state="disabled")
         except queue.Empty:
             pass
         self.after(10, self._poll)
@@ -185,12 +272,13 @@ class SerialMonitor(tk.Toplevel):
         self._txt.config(state="disabled")
 
 
+
 class EGMod:
     def __init__(self, root):
         self.root = root
         self.root.title("EGMod — Modbus RTU Tool")
         try:
-            self.root.iconbitmap("icon.ico")
+            self.root.iconbitmap(_resource_path("EGMod.ico"))
         except Exception:
             pass
         self.root.minsize(820, 560)
@@ -503,6 +591,11 @@ class EGMod:
     def _monitor_loop(self):
         while True:
             time.sleep(2)
+            try:
+                if not self.root.winfo_exists():
+                    break
+            except Exception:
+                break
             if not self.connected: continue
             ports = [p.device for p in serial.tools.list_ports.comports()]
             if self.connected_port not in ports:
@@ -812,10 +905,21 @@ class EGMod:
         self._save_status = ttk.Label(sav_btn_row, text="Idle", foreground=_FG2)
         self._save_status.pack(side="left")
 
+        addr_log_hdr = ttk.Frame(frm)
+        addr_log_hdr.pack(fill="x", pady=(8,0))
+        ttk.Label(addr_log_hdr, text="Log", foreground=_FG2, font=("Segoe UI", 9)).pack(side="left")
+        addr_clr = tk.Label(addr_log_hdr, text="✕", bg=_BG2, fg=_FG2,
+                            font=("Segoe UI", 9), cursor="hand2")
+        addr_clr.pack(side="right")
+        addr_clr.bind("<Button-1>", lambda e: (self._addr_log.config(state="normal"),
+                                               self._addr_log.delete("1.0", tk.END),
+                                               self._addr_log.config(state="normal")))
+        addr_clr.bind("<Enter>", lambda e: addr_clr.config(fg=_FG))
+        addr_clr.bind("<Leave>", lambda e: addr_clr.config(fg=_FG2))
         self._addr_log = scrolledtext.ScrolledText(frm, height=8, font=("Consolas", 9),
             bg=_BG, fg=_FG, insertbackground=_FG,
             selectbackground=_SEL, selectforeground=_FG)
-        self._addr_log.pack(fill="both", expand=True, pady=(8,0))
+        self._addr_log.pack(fill="both", expand=True)
         self._addr_log.vbar.configure(bg=_BG2, troughcolor=_BG, activebackground="#5A5A5A",
                                       relief="flat", borderwidth=0, highlightthickness=0)
 
@@ -1041,7 +1145,7 @@ class EGMod:
         for i, br in enumerate(["1200","2400","4800","9600","19200","38400","57600","115200"]):
             var = tk.BooleanVar(value=False)
             self._scan_baud_vars[br] = var
-            ttk.Checkbutton(baud_frm, text=br, variable=var).grid(row=0, column=i, padx=(0,12), sticky="w")
+            ToggleSwitch(baud_frm, text=br, variable=var).grid(row=0, column=i, padx=(0,12), sticky="w")
 
         # ── Parity ───────────────────────────────────────────────────────
         par_frm = ttk.LabelFrame(frm, text="Parity", padding=12)
@@ -1050,7 +1154,7 @@ class EGMod:
         for i, (par, lbl) in enumerate([("N","None (N)"),("E","Even (E)"),("O","Odd (O)")]):
             var = tk.BooleanVar(value=False)
             self._scan_parity_vars[par] = var
-            ttk.Checkbutton(par_frm, text=lbl, variable=var).grid(row=0, column=i, padx=(0,20), sticky="w")
+            ToggleSwitch(par_frm, text=lbl, variable=var).grid(row=0, column=i, padx=(0,20), sticky="w")
 
         # ── Stop Bits ───────────────────────────────────────────────────
         stop_frm = ttk.LabelFrame(frm, text="Stop Bits", padding=12)
@@ -1059,7 +1163,7 @@ class EGMod:
         for i, sb in enumerate(["1","1.5","2"]):
             var = tk.BooleanVar(value=False)
             self._scan_stop_vars[sb] = var
-            ttk.Checkbutton(stop_frm, text=sb, variable=var).grid(row=0, column=i, padx=(0,20), sticky="w")
+            ToggleSwitch(stop_frm, text=sb, variable=var).grid(row=0, column=i, padx=(0,20), sticky="w")
 
         self._scan_pretick()
 
@@ -1092,10 +1196,21 @@ class EGMod:
         tree_vs.pack(side="right", fill="y")
 
         # ── Log ────────────────────────────────────────────────────────
+        scan_log_hdr = ttk.Frame(frm)
+        scan_log_hdr.pack(fill="x", pady=(8,0))
+        ttk.Label(scan_log_hdr, text="Log", foreground=_FG2, font=("Segoe UI", 9)).pack(side="left")
+        scan_clr = tk.Label(scan_log_hdr, text="✕", bg=_BG2, fg=_FG2,
+                            font=("Segoe UI", 9), cursor="hand2")
+        scan_clr.pack(side="right")
+        scan_clr.bind("<Button-1>", lambda e: (self._scan_log.config(state="normal"),
+                                               self._scan_log.delete("1.0", tk.END),
+                                               self._scan_log.config(state="normal")))
+        scan_clr.bind("<Enter>", lambda e: scan_clr.config(fg=_FG))
+        scan_clr.bind("<Leave>", lambda e: scan_clr.config(fg=_FG2))
         self._scan_log = scrolledtext.ScrolledText(frm, height=6, font=("Consolas", 9),
             bg=_BG, fg=_FG, insertbackground=_FG,
             selectbackground=_SEL, selectforeground=_FG)
-        self._scan_log.pack(fill="x", pady=(8,0))
+        self._scan_log.pack(fill="x")
         self._scan_log.vbar.configure(bg=_BG2, troughcolor=_BG, activebackground="#5A5A5A",
                                       relief="flat", borderwidth=0, highlightthickness=0)
 
@@ -1143,11 +1258,17 @@ class EGMod:
         self._scan_prog_lbl.config(text="Starting…", foreground=_FG2)
         self._scan_running = True
         self._scan_btn.config(text="Stop Scan", style="Red.TButton")
+        orig_baud     = self.baud_cb.get()
+        orig_parity   = self.parity_cb.get()
+        orig_stop     = self.stopbits_cb.get()
+        orig_databits = self.databits_cb.get()
         threading.Thread(target=self._scan_worker,
-                         args=(combos, addr_from, addr_to, timeout_ms),
+                         args=(combos, addr_from, addr_to, timeout_ms,
+                               orig_baud, orig_parity, orig_stop, orig_databits),
                          daemon=True).start()
 
-    def _scan_worker(self, combos, addr_from, addr_to, timeout_ms):
+    def _scan_worker(self, combos, addr_from, addr_to, timeout_ms,
+                     orig_baud, orig_parity, orig_stop, orig_databits):
         def log(msg):
             self.root.after(0, lambda m=msg: self._scan_log_msg(m))
 
@@ -1163,11 +1284,9 @@ class EGMod:
                 self._scan_prog_lbl.config(text=label, foreground=_FG2)))
 
         orig_port   = self.connected_port
-        orig_baud   = self.baud_cb.get()
-        orig_parity = self.parity_cb.get()
-        orig_stop   = self.stopbits_cb.get()
         stop_map    = {"1": 1, "1.5": 1.5, "2": 2}
         cur_baud, cur_parity, cur_stop = orig_baud, orig_parity, orig_stop
+        total = len(combos) * (addr_to - addr_from + 1)
         step = 0
         found_count = 0
 
@@ -1177,7 +1296,7 @@ class EGMod:
                 self._unwrap_serial()
                 self.client.close()
                 kw = dict(port=orig_port, baudrate=int(baud),
-                          bytesize=int(self.databits_cb.get()),
+                          bytesize=int(orig_databits),
                           stopbits=stop_map.get(stop, 1),
                           parity=parity, timeout=timeout_s, retries=0)
                 try:    self.client = ModbusSerialClient(method="rtu", **kw)
@@ -1206,6 +1325,10 @@ class EGMod:
             for addr in range(addr_from, addr_to + 1):
                 if not self._scan_running: break
                 set_progress(step, f"baud={baud} par={parity} stop={stop}  addr={addr}")
+                if not self.client:
+                    log("⚠ Client disconnected during scan")
+                    self._scan_running = False
+                    break
                 try:
                     r = self.client.read_holding_registers(0, count=1, **{_SLAVE_KW: addr})
                     if r is not None:
@@ -1238,6 +1361,7 @@ class EGMod:
             if was_stopped:
                 self._scan_prog_lbl.config(text="Stopped", foreground=_FG2)
             else:
+                self._scan_progress.configure(value=total)
                 self._scan_prog_lbl.config(
                     text=f"Done — {found_count} device(s) found",
                     foreground="#276749" if found_count else _FG2)
@@ -1347,8 +1471,9 @@ class EGMod:
         self._cell_vcmd = (frm.register(_vcell), "%P")
 
         self._polling = False
-        self._poll_thread = None
-        self._reading = False
+        self._poll_after_id = None
+        self._reading = threading.Event()
+        self._last_cell_params = None
 
         btn_row = ttk.Frame(frm)
         btn_row.pack(fill="x", pady=(10,6))
@@ -1392,10 +1517,20 @@ class EGMod:
         self._cell_values = []
         self._rebuild_cells()
 
+        log_hdr = ttk.Frame(frm)
+        log_hdr.pack(fill="x", pady=(8,0))
+        ttk.Label(log_hdr, text="Log", foreground=_FG2, font=("Segoe UI", 9)).pack(side="left")
+        clr_lbl = tk.Label(log_hdr, text="✕", bg=_BG2, fg=_FG2,
+                           font=("Segoe UI", 9), cursor="hand2")
+        clr_lbl.pack(side="right")
+        clr_lbl.bind("<Button-1>", lambda e: (self._log.config(state="normal"),
+                                              self._log.delete("1.0", tk.END)))
+        clr_lbl.bind("<Enter>", lambda e: clr_lbl.config(fg=_FG))
+        clr_lbl.bind("<Leave>", lambda e: clr_lbl.config(fg=_FG2))
         self._log = scrolledtext.ScrolledText(frm, height=5, font=("Consolas", 9),
             bg=_BG, fg=_FG, insertbackground=_FG,
             selectbackground=_SEL, selectforeground=_FG)
-        self._log.pack(fill="x", pady=(8,0))
+        self._log.pack(fill="x")
         self._log.vbar.configure(bg=_BG2, troughcolor=_BG, activebackground="#5A5A5A",
                                  relief="flat", borderwidth=0, highlightthickness=0)
 
@@ -1439,6 +1574,7 @@ class EGMod:
 
         for c in range(C): self._cell_inner.grid_columnconfigure(c, weight=1)
         self._cell_values = [None] * count
+        self._last_cell_params = (count, start, fc)
         self._cell_canvas.update_idletasks()
         self._cell_canvas.configure(scrollregion=self._cell_canvas.bbox("all"))
 
@@ -1461,31 +1597,35 @@ class EGMod:
     def _toggle_polling(self):
         if self._polling:
             self._polling = False
+            if self._poll_after_id:
+                self.root.after_cancel(self._poll_after_id)
+                self._poll_after_id = None
             self._poll_btn.config(text="⟳", style="Teal.TButton")
         else:
             self._polling = True
+            self._poll_after_id = None
             self._poll_btn.config(text="⏹", style="Red.TButton")
-            self._poll_thread = threading.Thread(
-                target=self._poll_loop, daemon=True)
-            self._poll_thread.start()
+            self._schedule_poll()
 
-    def _poll_loop(self):
-        while self._polling:
-            self.root.after(0, self._do_read)
-            try:
-                interval = int(self.interval_spin.get())
-            except ValueError:
-                interval = 2000
-            time.sleep(max(interval, 500) / 1000)
+    def _schedule_poll(self):
+        if not self._polling:
+            return
+        self._do_read()
+        try:
+            interval = int(self.interval_spin.get())
+        except ValueError:
+            interval = 2000
+        self._poll_after_id = self.root.after(max(interval, 500), self._schedule_poll)
 
     def _log_msg(self, msg):
-        self._log.insert(tk.END, msg + "\n")
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self._log.insert(tk.END, f"[{ts}]  {msg}\n")
         self._log.see(tk.END)
 
     def _do_read(self):
         if not self.connected or not self.client:
             self._log_msg("⚠ Not connected"); return
-        if self._reading: return
+        if self._reading.is_set(): return
         try:
             sfmt  = self.slave_fmt.get(); afmt = self.addr_fmt.get()
             slave = int(self.slave_spin.get(), 16 if sfmt=="Hex" else 2 if sfmt=="Binary" else 10)
@@ -1496,12 +1636,14 @@ class EGMod:
 
         fc_str = self.fc_cb.get()
         try: fc = int(fc_str.split()[0].strip())
-        except ValueError:
+        except (ValueError, IndexError):
             self._log_msg("⚠ Could not parse function code"); return
 
         fmt = self.data_fmt.get()
-        self._rebuild_cells()
-        self._reading = True
+        cur_params = (count, addr, fc)
+        if self._last_cell_params != cur_params:
+            self._rebuild_cells()
+        self._reading.set()
         threading.Thread(target=self._do_read_io,
                          args=(fc, addr, count, slave, fmt),
                          daemon=True).start()
@@ -1538,7 +1680,7 @@ class EGMod:
             self.root.after(0, lambda e=e: self._log_msg(f"❌ {e}"))
             self.root.after(0, lambda: self._set_comms(False, "Comm error"))
         finally:
-            self._reading = False
+            self._reading.clear()
 
     def _read(self, fc, addr, count, slave):
         fns = {1:"read_coils", 2:"read_discrete_inputs",
