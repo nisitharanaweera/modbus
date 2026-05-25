@@ -288,6 +288,7 @@ class EGMod:
         self._serial_monitor = None
         self._port_map = {}  # label -> device
         self._scan_running = False
+        self._batch_running = False
         self._orig_serial_read = None
         self._orig_serial_write = None
         self._apply_style()
@@ -569,6 +570,7 @@ class EGMod:
         self._set_status(False, "Connection lost!" if lost else "Disconnected")
         self._set_comms(None)
         self._scan_running = False
+        self._batch_running = False
 
     def _set_status(self, ok, text=""):
         self.status_dot.config(foreground="green" if ok else "red")
@@ -666,6 +668,9 @@ class EGMod:
         f3 = ttk.Frame(nb, padding=12)
         nb.add(f3, text="Scan")
         self._build_scan_tab(f3)
+        f4 = ttk.Frame(nb, padding=12)
+        nb.add(f4, text="Batch")
+        self._build_batch_tab(f4)
 
     def _build_addr_tab(self, frm):
         cfg = ttk.LabelFrame(frm, text="Change Slave Address", padding=12)
@@ -1648,16 +1653,23 @@ class EGMod:
                          args=(fc, addr, count, slave, fmt),
                          daemon=True).start()
 
+    def _cells_set_error(self):
+        for _, lbl in self._cell_labels:
+            if isinstance(lbl, tk.Label):
+                lbl.config(text="_", bg="#3A1010", fg="#FC8181")
+
     def _do_read_io(self, fc, addr, count, slave, fmt):
         try:
             result = self._read(fc, addr, count, slave)
             if result is None:
                 self.root.after(0, lambda: self._log_msg("⚠ No response — check wiring, address, baud rate"))
                 self.root.after(0, lambda: self._set_comms(False, "No response"))
+                self.root.after(0, self._cells_set_error)
                 return
             if hasattr(result, "isError") and result.isError():
                 self.root.after(0, lambda r=result: self._log_msg(f"❌ Modbus error: {r}"))
                 self.root.after(0, lambda: self._set_comms(False, "Modbus error"))
+                self.root.after(0, self._cells_set_error)
                 return
 
             values = getattr(result, "registers", None) or list(getattr(result, "bits", []))
@@ -1679,6 +1691,7 @@ class EGMod:
         except Exception as e:
             self.root.after(0, lambda e=e: self._log_msg(f"❌ {e}"))
             self.root.after(0, lambda: self._set_comms(False, "Comm error"))
+            self.root.after(0, self._cells_set_error)
         finally:
             self._reading.clear()
 
@@ -1775,6 +1788,336 @@ class EGMod:
         except Exception:
             return None
         return None
+
+    # ── Batch Tab ────────────────────────────────────────────────────────
+
+    def _build_batch_tab(self, frm):
+        # ── Request Config ───────────────────────────────────────────────
+        cfg = ttk.LabelFrame(frm, text="Request", padding=12)
+        cfg.pack(fill="x")
+
+        ttk.Label(cfg, text="Slave From:").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self._batch_from_spin = ttk.Spinbox(cfg, from_=1, to=247, width=6)
+        self._batch_from_spin.set("1")
+        self._batch_from_spin.grid(row=0, column=1, sticky="w", padx=(0, 20))
+
+        ttk.Label(cfg, text="To:").grid(row=0, column=2, sticky="w", padx=(0, 4))
+        self._batch_to_spin = ttk.Spinbox(cfg, from_=1, to=247, width=6)
+        self._batch_to_spin.set("20")
+        self._batch_to_spin.grid(row=0, column=3, sticky="w", padx=(0, 20))
+
+        ttk.Label(cfg, text="Function Code:").grid(row=0, column=4, sticky="w", padx=(0, 4))
+        self._batch_fc_cb = ttk.Combobox(cfg, width=28, state="readonly", values=[
+            "01 \u2014 Read Coils",
+            "02 \u2014 Read Discrete Inputs",
+            "03 \u2014 Read Holding Registers",
+            "04 \u2014 Read Input Registers",
+        ])
+        self._batch_fc_cb.set("03 \u2014 Read Holding Registers")
+        self._batch_fc_cb.grid(row=0, column=5, sticky="w")
+
+        ttk.Label(cfg, text="Data Format:").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(10, 0))
+        self._batch_fmt_cb = ttk.Combobox(cfg, values=["Decimal", "Hex", "Binary"],
+                                           width=8, state="readonly")
+        self._batch_fmt_cb.set("Decimal")
+        self._batch_fmt_cb.grid(row=1, column=1, sticky="w", padx=(0, 20), pady=(10, 0))
+
+        ttk.Label(cfg, text="Timeout (ms):").grid(row=1, column=2, sticky="w", padx=(0, 4), pady=(10, 0))
+        self._batch_timeout_spin = ttk.Spinbox(cfg, from_=100, to=5000, increment=100, width=6)
+        self._batch_timeout_spin.set("500")
+        self._batch_timeout_spin.grid(row=1, column=3, sticky="w", pady=(10, 0))
+
+        self._batch_repeat_var = tk.BooleanVar(value=False)
+        def _on_repeat_toggle(*_):
+            self._batch_interval_spin.config(
+                state="normal" if self._batch_repeat_var.get() else "disabled")
+        repeat_row = ttk.Frame(cfg)
+        repeat_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ToggleSwitch(repeat_row, text="Repeat", variable=self._batch_repeat_var,
+                     command=_on_repeat_toggle).pack(side="left")
+        ttk.Label(cfg, text="Interval (ms):").grid(row=2, column=2, sticky="w", padx=(0, 4), pady=(10, 0))
+        self._batch_interval_spin = ttk.Spinbox(cfg, from_=500, to=60000, increment=500, width=7)
+        self._batch_interval_spin.set("2000")
+        self._batch_interval_spin.config(state="disabled")
+        self._batch_interval_spin.grid(row=2, column=3, sticky="w", pady=(10, 0))
+
+        # ── Register Sets ────────────────────────────────────────────────
+        sets_frm = ttk.LabelFrame(frm, text="Register Sets", padding=8)
+        sets_frm.pack(fill="x", pady=(8, 0))
+
+        hdr_row = ttk.Frame(sets_frm)
+        hdr_row.pack(fill="x", padx=(0, 0), pady=(0, 2))
+        ttk.Label(hdr_row, text="Start Reg", foreground=_FG2,
+                  font=("Segoe UI", 9), width=10).pack(side="left", padx=(52, 0))
+        ttk.Label(hdr_row, text="Count", foreground=_FG2,
+                  font=("Segoe UI", 9)).pack(side="left", padx=(18, 0))
+
+        self._batch_sets_container = ttk.Frame(sets_frm)
+        self._batch_sets_container.pack(fill="x")
+        self._batch_reg_sets = []   # list of [start_spin, count_spin, row_frame]
+
+        ttk.Button(sets_frm, text="\u002b Add Set", style="Teal.TButton",
+                   command=self._batch_add_set).pack(side="left", pady=(6, 0))
+
+        self._batch_add_set()   # start with one default row
+
+        # ── Progress ─────────────────────────────────────────────────────
+        prog_row = ttk.Frame(frm)
+        prog_row.pack(fill="x", pady=(10, 0))
+        self._batch_btn = ttk.Button(prog_row, text="Start Batch", style="Teal.TButton",
+                                     command=self._do_batch)
+        self._batch_btn.pack(side="left", padx=(0, 12))
+        self._batch_progress = ttk.Progressbar(prog_row, mode="determinate", length=220)
+        self._batch_progress.pack(side="left", padx=(0, 10))
+        self._batch_prog_lbl = ttk.Label(prog_row, text="", foreground=_FG2)
+        self._batch_prog_lbl.pack(side="left")
+
+        # ── Results ──────────────────────────────────────────────────────
+        res_frm = ttk.Frame(frm)
+        res_frm.pack(fill="both", expand=True, pady=(10, 0))
+        cols = ("addr_dec", "addr_hex", "reg_set", "status", "values")
+        self._batch_tree = ttk.Treeview(res_frm, columns=cols, show="headings", height=7)
+        for col, hdr, w, anchor in [
+                ("addr_dec", "Addr (dec)",   80, "center"),
+                ("addr_hex", "Addr (hex)",   80, "center"),
+                ("reg_set",  "Register Set", 110, "center"),
+                ("status",   "Status",        90, "center"),
+                ("values",   "Values",        330, "w")]:
+            self._batch_tree.heading(col, text=hdr)
+            self._batch_tree.column(col, width=w, anchor=anchor)
+        self._batch_tree.tag_configure("ok",   background="#1A3A2A", foreground="#9CD49C")
+        self._batch_tree.tag_configure("err",  background="#3A1A1A", foreground="#FC8181")
+        self._batch_tree.tag_configure("none", background="#2D2D2D", foreground=_FG2)
+        tree_vs = ttk.Scrollbar(res_frm, orient="vertical", command=self._batch_tree.yview)
+        self._batch_tree.configure(yscrollcommand=tree_vs.set)
+        self._batch_tree.pack(side="left", fill="both", expand=True)
+        tree_vs.pack(side="right", fill="y")
+
+        # ── Log ──────────────────────────────────────────────────────────
+        batch_log_hdr = ttk.Frame(frm)
+        batch_log_hdr.pack(fill="x", pady=(8, 0))
+        ttk.Label(batch_log_hdr, text="Log", foreground=_FG2,
+                  font=("Segoe UI", 9)).pack(side="left")
+        batch_clr = tk.Label(batch_log_hdr, text="\u2715", bg=_BG2, fg=_FG2,
+                             font=("Segoe UI", 9), cursor="hand2")
+        batch_clr.pack(side="right")
+        batch_clr.bind("<Button-1>", lambda e: self._batch_log.delete("1.0", tk.END))
+        batch_clr.bind("<Enter>", lambda e: batch_clr.config(fg=_FG))
+        batch_clr.bind("<Leave>", lambda e: batch_clr.config(fg=_FG2))
+        self._batch_log = scrolledtext.ScrolledText(frm, height=4, font=("Consolas", 9),
+            bg=_BG, fg=_FG, insertbackground=_FG,
+            selectbackground=_SEL, selectforeground=_FG)
+        self._batch_log.pack(fill="x")
+        self._batch_log.vbar.configure(bg=_BG2, troughcolor=_BG, activebackground="#5A5A5A",
+                                       relief="flat", borderwidth=0, highlightthickness=0)
+
+    def _batch_add_set(self):
+        row = ttk.Frame(self._batch_sets_container)
+        row.pack(fill="x", pady=(2, 0))
+        n = len(self._batch_reg_sets) + 1
+        ttk.Label(row, text=f"Set {n:>2}:", foreground=_FG2,
+                  font=("Segoe UI", 9), width=6).pack(side="left", padx=(0, 6))
+        start_spin = ttk.Spinbox(row, from_=0, to=65535, width=7)
+        start_spin.set("0")
+        start_spin.pack(side="left", padx=(0, 6))
+        ttk.Label(row, text="\u00d7", foreground=_FG2).pack(side="left", padx=(0, 4))
+        count_spin = ttk.Spinbox(row, from_=1, to=125, width=5)
+        count_spin.set("2")
+        count_spin.pack(side="left", padx=(0, 10))
+        entry = [start_spin, count_spin, row]
+        rm = tk.Label(row, text="\u2715", bg=_BG2, fg=_FG2,
+                      font=("Segoe UI", 9), cursor="hand2")
+        rm.pack(side="left")
+        rm.bind("<Button-1>", lambda e, ent=entry: self._batch_remove_set(ent))
+        rm.bind("<Enter>",    lambda e, r=rm: r.config(fg=_FG))
+        rm.bind("<Leave>",    lambda e, r=rm: r.config(fg=_FG2))
+        self._batch_reg_sets.append(entry)
+
+    def _batch_remove_set(self, entry):
+        if len(self._batch_reg_sets) <= 1:
+            return   # keep at least one
+        self._batch_reg_sets.remove(entry)
+        entry[2].destroy()
+
+    def _batch_log_msg(self, msg):
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self._batch_log.insert(tk.END, f"[{ts}]  {msg}\n")
+        self._batch_log.see(tk.END)
+
+    def _do_batch(self):
+        if self._batch_running:
+            self._batch_running = False
+            return
+        if not self.connected or not self.client:
+            self._batch_log_msg("⚠ Not connected — connect to a port first")
+            return
+        try:
+            addr_from  = int(self._batch_from_spin.get())
+            addr_to    = int(self._batch_to_spin.get())
+            timeout_ms = int(self._batch_timeout_spin.get())
+        except ValueError:
+            self._batch_log_msg("⚠ Invalid input values"); return
+        if addr_from > addr_to:
+            self._batch_log_msg("⚠ 'From' must be ≤ 'To'"); return
+        reg_sets = []
+        for s_spin, c_spin, _ in self._batch_reg_sets:
+            try:
+                reg_sets.append((int(s_spin.get()), int(c_spin.get())))
+            except ValueError:
+                self._batch_log_msg("⚠ Invalid register set values"); return
+        if not reg_sets:
+            self._batch_log_msg("⚠ Add at least one register set"); return
+        fc_str = self._batch_fc_cb.get()
+        try:
+            fc = int(fc_str.split()[0].strip())
+        except (ValueError, IndexError):
+            self._batch_log_msg("⚠ Invalid function code"); return
+        for row in self._batch_tree.get_children():
+            self._batch_tree.delete(row)
+        self._batch_log.delete("1.0", tk.END)
+        total = addr_to - addr_from + 1
+        self._batch_progress.configure(maximum=total, value=0)
+        self._batch_prog_lbl.config(text="Starting…", foreground=_FG2)
+        self._batch_running = True
+        self._batch_btn.config(text="Stop Batch", style="Red.TButton")
+        fmt = self._batch_fmt_cb.get()
+        repeat = self._batch_repeat_var.get()
+        try:
+            repeat_interval_ms = int(self._batch_interval_spin.get())
+        except ValueError:
+            repeat_interval_ms = 2000
+        threading.Thread(target=self._batch_worker,
+                         args=(addr_from, addr_to, fc, reg_sets, fmt, timeout_ms,
+                               repeat, repeat_interval_ms),
+                         daemon=True).start()
+
+    def _batch_worker(self, addr_from, addr_to, fc, reg_sets, fmt, timeout_ms,
+                      repeat, repeat_interval_ms):
+        def log(msg):
+            self.root.after(0, lambda m=msg: self._batch_log_msg(m))
+
+        def add_row(addr, set_label, status, values_str, tag):
+            self.root.after(0, lambda: self._batch_tree.insert(
+                "", "end",
+                values=(str(addr), f"0x{addr:02X}", set_label, status, values_str),
+                tags=(tag,)))
+
+        def set_progress(val, label):
+            self.root.after(0, lambda: (
+                self._batch_progress.configure(value=val),
+                self._batch_prog_lbl.config(text=label, foreground=_FG2)))
+
+        def clear_tree():
+            self.root.after(0, lambda: [
+                self._batch_tree.delete(r)
+                for r in self._batch_tree.get_children()])
+
+        fns = {1: "read_coils", 2: "read_discrete_inputs",
+               3: "read_holding_registers", 4: "read_input_registers"}
+        fn_name = fns.get(fc)
+        if not fn_name:
+            log(f"⚠ Unsupported function code {fc}")
+            self.root.after(0, lambda: (
+                self._batch_btn.config(text="Start Batch", style="Teal.TButton"),
+                setattr(self, "_batch_running", False)))
+            return
+
+        total      = addr_to - addr_from + 1
+        round_num  = 0
+        ok_total   = 0
+        err_total  = 0
+        orig_timeout = getattr(self.client, "timeout", None)
+        try:
+            self.client.timeout = timeout_ms / 1000
+        except Exception:
+            pass
+
+        while True:
+            round_num += 1
+            ok_count  = 0
+            err_count = 0
+
+            if repeat and round_num > 1:
+                clear_tree()
+                self.root.after(0, lambda: self._batch_progress.configure(value=0))
+                log(f"── Round {round_num} ──")
+
+            for i, addr in enumerate(range(addr_from, addr_to + 1)):
+                if not self._batch_running:
+                    break
+                lbl = f"addr={addr}  ({i + 1}/{total})"
+                if repeat:
+                    lbl = f"Round {round_num}  {lbl}"
+                set_progress(i + 1, lbl)
+                for reg_start, count in reg_sets:
+                    if not self._batch_running:
+                        break
+                    if not self.client:
+                        log("⚠ Client disconnected during batch")
+                        self._batch_running = False
+                        break
+                    set_label = f"{reg_start} ×{count}"
+                    try:
+                        fn = getattr(self.client, fn_name)
+                        r = fn(reg_start, count=count, **{_SLAVE_KW: addr})
+                        if r is None:
+                            add_row(addr, set_label, "⚠ None", "No response", "none")
+                            err_count += 1
+                        elif hasattr(r, "isError") and r.isError():
+                            exc = getattr(r, "exception_code", "?")
+                            add_row(addr, set_label, "❌ Err", f"Modbus exception {exc}", "err")
+                            err_count += 1
+                        else:
+                            vals = getattr(r, "registers", None) or list(getattr(r, "bits", []))
+                            vals_str = "  ".join(to_display(int(v), fmt) for v in vals)
+                            add_row(addr, set_label, "✅ OK", vals_str, "ok")
+                            ok_count += 1
+                    except Exception as e:
+                        add_row(addr, set_label, "❌ Err", str(e), "err")
+                        err_count += 1
+
+            ok_total  += ok_count
+            err_total += err_count
+
+            if not self._batch_running:
+                break
+            if not repeat:
+                break
+
+            # Wait for next round, checking stop flag every 100 ms
+            log(f"Round {round_num} done — OK={ok_count}  Errors={err_count}  "
+                f"(waiting {repeat_interval_ms} ms)")
+            elapsed = 0
+            while elapsed < repeat_interval_ms and self._batch_running:
+                time.sleep(0.1)
+                elapsed += 100
+            if not self._batch_running:
+                break
+
+        if orig_timeout is not None and self.client:
+            try:
+                self.client.timeout = orig_timeout
+            except Exception:
+                pass
+
+        was_stopped = not self._batch_running
+
+        def _done():
+            self._batch_running = False
+            self._batch_btn.config(text="Start Batch", style="Teal.TButton")
+            self._batch_progress.configure(value=total)
+            if was_stopped:
+                self._batch_prog_lbl.config(text="Stopped", foreground=_FG2)
+            else:
+                rounds_txt = f"  ({round_num} round{'s' if round_num != 1 else ''})" if repeat else ""
+                self._batch_prog_lbl.config(
+                    text=f"Done{rounds_txt} — {ok_total} OK, {err_total} error(s)",
+                    foreground="#276749" if ok_total else _FG2)
+            self._batch_log_msg(
+                f"{'Stopped' if was_stopped else 'Done'} — "
+                f"Rounds={round_num}  OK={ok_total}  Errors={err_total}")
+
+        self.root.after(0, _done)
 
 
 if __name__ == "__main__":
